@@ -1192,11 +1192,14 @@ function recFrame() { // called right after each composer.render(), while the We
   if (now - REC.lastDraw < 1000 / REC.FPS - 4) return; REC.lastDraw = now; // the stream only samples 30 fps: skip the copies it would drop
   const c = REC.ctx, w = REC.cv.width, h = REC.cv.height; c.drawImage(canvas, 0, 0, w, h);
   if (REC.card) recCard(c, w, h);
+  watermark(c, w, h);
+}
+function watermark(c, w, h) {
   const fs = Math.max(11, Math.round(h * .022)); c.font = `600 ${fs}px Oxanium, "Arial Narrow", sans-serif`; c.textAlign = 'right'; c.textBaseline = 'bottom';
   c.shadowColor = 'rgba(0,0,0,.8)'; c.shadowBlur = fs * .4; c.fillStyle = 'rgba(255,255,255,.6)'; c.fillText('ROADSTER LAUNCH  ·  nathan6609.github.io/roadster-launch', w - fs, h - fs * .8); c.shadowBlur = 0;
 }
-function recCard(c, w, h) { // end card: dims the last frames and lays the result over them, fading in
-  const C = REC.card, a = Math.min(1, (performance.now() - C.t) / 450), u = Math.min(w, h) / 720, m = h / 2; // laid out round the middle in short-side units, so it reads in landscape and portrait
+function recCard(c, w, h, C = REC.card) { // end card: dims the last frames and lays the result over them, fading in (also the share image)
+  const a = Math.min(1, (performance.now() - C.t) / 450), u = Math.min(w, h) / 720, m = h / 2; // laid out round the middle in short-side units, so it reads in landscape and portrait
   const text = (s, px, font, y) => { c.font = font.replace('#', Math.round(px)); const k = Math.min(1, w * .9 / c.measureText(s).width); // shrink to fit a portrait frame
     if (k < 1) c.font = font.replace('#', Math.floor(px * k)); c.fillText(s, w / 2, y); };
   const DISPLAY = '800 italic #px Oxanium, "Arial Narrow", sans-serif', MONO = '500 #px "IBM Plex Mono", ui-monospace, monospace';
@@ -1208,6 +1211,16 @@ function recCard(c, w, h) { // end card: dims the last frames and lays the resul
     return c.measureText(l).width > w * .9 && p.length > 2 ? [p.slice(0, n).join('  ·  '), p.slice(n).join('  ·  ')] : [l]; });
   lines.forEach((l, i) => text(l, 24 * u, MONO, m + ((C.score ? 100 : 40) + i * 40) * u));
   c.restore();
+}
+/* ============ share image: the final dashboard as a 1200x675 picture. X's post link can't carry one, so it goes through the
+   phone's share sheet or the desktop clipboard (see shareX) ============ */
+const DASH = { want: null, blob: null };
+function dashFrame() { // called right after composer.render(), like recFrame: grabs the frame behind the result panel once asked
+  if (!DASH.want) return; const card = DASH.want; DASH.want = null;
+  const W = 1200, H = 675, cv = document.createElement('canvas'); cv.width = W; cv.height = H; const c = cv.getContext('2d');
+  const k = Math.max(W / canvas.width, H / canvas.height), dw = canvas.width * k, dh = canvas.height * k; // cover-crop the game frame to 16:9
+  c.drawImage(canvas, (W - dw) / 2, (H - dh) / 2, dw, dh); recCard(c, W, H, card); watermark(c, W, H);
+  cv.toBlob(b => { DASH.blob = b; }, 'image/png'); // ready long before anyone reaches the button, so the click can share it straight away
 }
 function recStart() {
   try { if (REC.r && REC.r.state !== 'inactive') { REC.r.onstop = null; REC.r.stop(); } } catch (e) {}
@@ -1277,7 +1290,15 @@ function shareText(rolls, flips) {
     : 'I got the Roadster through the launch but missed the line-up 😅 Can you clear it?';
   return `${head}\n🏁 ${st.score ? st.score.toLocaleString('en-US') + ' pts · ' : ''}${runStats(rolls, flips).join(' · ')}`;
 }
-function shareX(text) { window.open('https://x.com/intent/post?text=' + encodeURIComponent(text + ' via @nathangu76') + '&url=' + encodeURIComponent(SHARE_URL), '_blank', 'noopener'); }
+function shareX(text) { // X's post link can't attach an image: phones share the dashboard picture through the share sheet (pick X),
+  // desktops get it on the clipboard to paste into the post that opens
+  const post = text + ' via @nathangu76', intent = () => window.open('https://x.com/intent/post?text=' + encodeURIComponent(post) + '&url=' + encodeURIComponent(SHARE_URL), '_blank', 'noopener');
+  if (DASH.blob && TOUCH_UI && navigator.canShare) { const file = new File([DASH.blob], 'roadster-launch.png', { type: 'image/png' });
+    if (navigator.canShare({ files: [file] })) { navigator.share({ files: [file], text: `${post}\n${SHARE_URL}` }).catch(e => { if (e.name !== 'AbortError') intent(); }); return; } }
+  if (DASH.blob && window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+    navigator.clipboard.write([new ClipboardItem({ 'image/png': DASH.blob })]).then(() => flash('Dashboard image copied · paste it into your post', 5, true), () => {}); }
+  intent();
+}
 function shareInstagram(text) { // Instagram has no web share link: phones get the share sheet with the clip attached, desktops get the pieces
   const caption = `${text}\nPlay free: ${SHARE_URL}`;
   try { navigator.clipboard.writeText(caption).catch(() => {}); } catch (e) {} // the share sheet drops the text for Instagram, so it's on the clipboard to paste
@@ -1340,6 +1361,7 @@ function showResult() {
   const canRec = !!REC.r;
   resEl.innerHTML = `${badge}<h2>${h}</h2>${score > 0 ? '<div class="score-big"><span>0</span><small>PTS</small></div>' : ''}${sub ? `<div class="sub">${sub.split(' · ').map(x => `<span>${x.replace(/\d[\d.,]*/, '<b>$&</b>')}</span>`).join('')}</div>` : ''}${tip ? `<div class="tip">${tip}</div>` : ''}<div class="acts"><button class="again" type="button">↺ Run it again</button><button class="share" data-share="x" type="button">Share on 𝕏</button>${canRec ? '<button class="share" data-share="ig" data-rec="ig" type="button" disabled>Instagram</button><button id="dl" data-rec="dl" type="button" disabled>Saving replay…</button>' : ''}</div><a class="by" href="https://x.com/nathangu76" target="_blank" rel="noopener">Made by @nathangu76</a>`;
   resEl.hidden = false; countUp(resEl.querySelector('.score-big'), score); const ag = resEl.querySelector('.again'); if (ag) ag.onclick = () => spawn();
+  DASH.blob = null; DASH.want = { t: -1e9, head: h.replace(/<[^>]+>/g, ''), score: score > 0 ? score.toLocaleString('en-US') : '', lines: sub ? [sub.split(' · ').join('  ·  ')] : [] }; // the share image: this panel as a picture
   const text = shareText(rolls, flips); resEl.querySelector('[data-share="x"]').onclick = () => shareX(text);
   if (canRec) { resEl.querySelector('[data-share="ig"]').onclick = () => shareInstagram(text); document.getElementById('dl').onclick = recDownload; if (REC.url) recReady();
     REC.card = { t: performance.now(), head: h.replace(/<[^>]+>/g, ''), score: score > 0 ? score.toLocaleString('en-US') : '', lines: [st.phase === 'crashed' ? st.crashWhy : '', runStats(rolls, flips).join('  ·  ')].filter(Boolean) };
@@ -1806,7 +1828,7 @@ function frame(now) {
   if (window.__pause) { smokePass.enabled = VOL.ok && VOL.list.length > 0; composer.render(); requestAnimationFrame(frame); return; } // test hook: render only, the sim is stepped by hand
   if (running) for (let i = 0; i < 4; i++) step(dt / 4);
   ambT += dt; if (ambT > .12) { ambT = 0; const m = machines[(rnd() * machines.length) | 0]; puff(m.clone().add(V((rnd() - .5) * 4, 0, 0)), V((rnd() - .5) * 2, .4, 2 + rnd() * 2), 2.5, 9, rnd() < .35 ? 0xc87c86 : 0xaab1bb, .32, 2.2); }
-  updateSmoke(dt); updateBillows(dt); updateVol(dt); updateProps(dt); heroUpdate(dt); updateShock(dt); updateCrowd(dt, now / 1000); updateGlow(now / 1000); updateCoils(dt); updateMars(); updateProgress(); updateFloods(dt); updateCamera(dt); updateAudio(); smokePass.enabled = VOL.ok && VOL.list.length > 0; composer.render(); recFrame();
+  updateSmoke(dt); updateBillows(dt); updateVol(dt); updateProps(dt); heroUpdate(dt); updateShock(dt); updateCrowd(dt, now / 1000); updateGlow(now / 1000); updateCoils(dt); updateMars(); updateProgress(); updateFloods(dt); updateCamera(dt); updateAudio(); smokePass.enabled = VOL.ok && VOL.list.length > 0; composer.render(); recFrame(); dashFrame();
   if (smokePass.enabled) { slowT = (now - last0) > 25 ? slowT + dt : Math.max(0, slowT - dt); if (slowT > 1) smokePass.degrade(); } last0 = now;
   const sp = st.mode === 'air' ? st.vel.length() : Math.abs(st.v);
   const reversing = st.mode === 'ground' && st.v < -.05; spdEl.textContent = (reversing ? 'R ' : '') + Math.round(sp * 3.6);
