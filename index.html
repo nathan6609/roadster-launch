@@ -140,6 +140,8 @@ html,body{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-
 #result .acts button{margin:0}
 #result .share{pointer-events:auto;cursor:pointer;font:inherit;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:#fff;background:#14171c;border:1px solid rgba(255,255,255,.4);padding:8px 16px}
 #result .share:hover{background:#22262d}
+#result .share:disabled{opacity:.5;cursor:default}
+#result .acts #dl{margin:0}
 #result .anykey{margin-top:8px;font-size:10px;letter-spacing:.24em;text-transform:uppercase;color:var(--dim)}
 #result .again{pointer-events:auto;cursor:pointer;margin:12px auto 0;display:block;font:inherit;font-size:11px;letter-spacing:.26em;text-transform:uppercase;color:rgba(255,120,110,.95);background:transparent;border:1px solid rgba(255,80,70,.55);padding:8px 16px}
 #start .disc{font-size:10px;color:var(--dim);letter-spacing:.06em;max-width:86vw;margin:10px auto 0}
@@ -1175,34 +1177,55 @@ function step(dt) {
   st.prevKeys = { KeyA: keys.KeyA, KeyD: keys.KeyD, ArrowUp: keys.ArrowUp, ArrowDown: keys.ArrowDown, Space: keys.Space };
 }
 /* ============ replay recorder: canvas video + the game's own audio, from the start of the run to the end ============ */
-// the replay is drawn into its own canvas, capped at 1080p (720p on phones) with a faint watermark, at a bitrate sized to that
-// resolution (~6 Mbps at 1080p60), and stops itself after 75 s: sharp enough to post, small enough to send
-const REC = { r: null, chunks: [], url: null, mime: '', cv: document.createElement('canvas'), ctx: null, t0: 0, MAX_S: 75 };
+// the replay is drawn into its own canvas, capped at 720p (540p on phones) and 30 fps with a faint watermark, at ~1.7 Mbps
+// (H.264 where the browser has it, so X and Instagram take it as is), and stops itself after 60 s: a typical run is ~5 MB.
+// The run's stats are burned into the last few seconds as an end card, so the clip carries them wherever it's posted.
+const REC = { r: null, chunks: [], blob: null, url: null, mime: '', cv: document.createElement('canvas'), ctx: null, t0: 0, MAX_S: 60, FPS: 30, lastDraw: 0, card: null };
 REC.ctx = REC.cv.getContext('2d');
 function recFrame() { // called right after each composer.render(), while the WebGL frame is still readable
   if (!REC.r || REC.r.state !== 'recording') return;
-  if (performance.now() - REC.t0 > REC.MAX_S * 1000) { try { REC.r.stop(); } catch (e) {} return; }
+  const now = performance.now();
+  if (now - REC.t0 > REC.MAX_S * 1000) { try { REC.r.stop(); } catch (e) {} return; }
+  if (now - REC.lastDraw < 1000 / REC.FPS - 4) return; REC.lastDraw = now; // the stream only samples 30 fps: skip the copies it would drop
   const c = REC.ctx, w = REC.cv.width, h = REC.cv.height; c.drawImage(canvas, 0, 0, w, h);
+  if (REC.card) recCard(c, w, h);
   const fs = Math.max(11, Math.round(h * .022)); c.font = `600 ${fs}px Oxanium, "Arial Narrow", sans-serif`; c.textAlign = 'right'; c.textBaseline = 'bottom';
   c.shadowColor = 'rgba(0,0,0,.8)'; c.shadowBlur = fs * .4; c.fillStyle = 'rgba(255,255,255,.6)'; c.fillText('ROADSTER LAUNCH  ·  nathan6609.github.io/roadster-launch', w - fs, h - fs * .8); c.shadowBlur = 0;
 }
+function recCard(c, w, h) { // end card: dims the last frames and lays the result over them, fading in
+  const C = REC.card, a = Math.min(1, (performance.now() - C.t) / 450), u = Math.min(w, h) / 720, m = h / 2; // laid out round the middle in short-side units, so it reads in landscape and portrait
+  const text = (s, px, font, y) => { c.font = font.replace('#', Math.round(px)); const k = Math.min(1, w * .9 / c.measureText(s).width); // shrink to fit a portrait frame
+    if (k < 1) c.font = font.replace('#', Math.floor(px * k)); c.fillText(s, w / 2, y); };
+  const DISPLAY = '800 italic #px Oxanium, "Arial Narrow", sans-serif', MONO = '500 #px "IBM Plex Mono", ui-monospace, monospace';
+  c.save(); c.globalAlpha = a; c.fillStyle = 'rgba(4,5,8,.74)'; c.fillRect(0, 0, w, h); c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.shadowColor = 'rgba(255,60,40,.55)'; c.shadowBlur = 24 * u; c.fillStyle = '#fff'; text(C.head, 64 * u, DISPLAY, m - (C.score ? 110 : 30) * u);
+  if (C.score) { c.shadowColor = 'rgba(255,160,60,.7)'; c.fillStyle = '#ffd36b'; text(C.score + ' PTS', 118 * u, DISPLAY, m); }
+  c.shadowBlur = 0; c.fillStyle = 'rgba(255,255,255,.88)'; c.font = MONO.replace('#', Math.round(24 * u));
+  const lines = C.lines.flatMap(l => { const p = l.split('  ·  '), n = Math.ceil(p.length / 2); // too long for a portrait frame: break the stats over two lines
+    return c.measureText(l).width > w * .9 && p.length > 2 ? [p.slice(0, n).join('  ·  '), p.slice(n).join('  ·  ')] : [l]; });
+  lines.forEach((l, i) => text(l, 24 * u, MONO, m + ((C.score ? 100 : 40) + i * 40) * u));
+  c.restore();
+}
 function recStart() {
   try { if (REC.r && REC.r.state !== 'inactive') { REC.r.onstop = null; REC.r.stop(); } } catch (e) {}
-  if (REC.url) { URL.revokeObjectURL(REC.url); REC.url = null; }
+  if (REC.url) { URL.revokeObjectURL(REC.url); REC.url = null; } REC.blob = null; REC.card = null; REC.lastDraw = 0;
   if (!REC.cv.captureStream || !window.MediaRecorder) return;
-  const cap = TOUCH_UI ? 1280 : 1920, k = Math.min(1, cap / Math.max(canvas.width, canvas.height));
+  const cap = TOUCH_UI ? 960 : 1280, k = Math.min(1, cap / Math.max(canvas.width, canvas.height));
   REC.cv.width = Math.round(canvas.width * k / 2) * 2; REC.cv.height = Math.round(canvas.height * k / 2) * 2; // even sizes for the encoder
-  const stream = REC.cv.captureStream(60); if (snd.recDest) for (const t of snd.recDest.stream.getAudioTracks()) stream.addTrack(t);
+  const stream = REC.cv.captureStream(REC.FPS); if (snd.recDest) for (const t of snd.recDest.stream.getAudioTracks()) stream.addTrack(t);
   REC.mime = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
-  const vbr = Math.round(Math.max(2e6, Math.min(7e6, REC.cv.width * REC.cv.height * 60 * .05)));
-  try { REC.r = new MediaRecorder(stream, REC.mime ? { mimeType: REC.mime, videoBitsPerSecond: vbr, audioBitsPerSecond: 128000 } : undefined); } catch (e) { REC.r = null; return; }
+  const vbr = Math.round(Math.max(.8e6, Math.min(2.5e6, REC.cv.width * REC.cv.height * REC.FPS * .06))); // ~1.7 Mbps at 720p30
+  try { REC.r = new MediaRecorder(stream, REC.mime ? { mimeType: REC.mime, videoBitsPerSecond: vbr, audioBitsPerSecond: 96000 } : undefined); } catch (e) { REC.r = null; return; }
   REC.t0 = performance.now();
   REC.chunks = []; REC.r.ondataavailable = e => { if (e.data && e.data.size) REC.chunks.push(e.data); };
-  REC.r.onstop = () => { REC.url = URL.createObjectURL(new Blob(REC.chunks, { type: REC.mime || 'video/webm' })); const b = document.getElementById('dl'); if (b) { b.disabled = false; b.textContent = 'Download replay'; } };
+  REC.r.onstop = () => { REC.blob = new Blob(REC.chunks, { type: REC.mime || 'video/webm' }); REC.url = URL.createObjectURL(REC.blob); recReady(); };
   REC.r.start(500);
 }
-function recStop(delay = 1200) { setTimeout(() => { try { if (REC.r && REC.r.state === 'recording') REC.r.stop(); } catch (e) {} }, delay); }
+function recStop(delay = 1200) { const r = REC.r; setTimeout(() => { try { if (r && r.state === 'recording') r.stop(); } catch (e) {} }, delay); } // this run's recorder, not one a quick restart has started since
 function recDownload() { if (!REC.url) return; const a = document.createElement('a'); a.href = REC.url; a.download = `roadster-launch-${Date.now()}.${/mp4/.test(REC.mime) ? 'mp4' : 'webm'}`; document.body.appendChild(a); a.click(); a.remove(); }
+const recName = () => `roadster-launch-${Date.now()}.${/mp4/.test(REC.mime) ? 'mp4' : 'webm'}`; // the file name recDownload gives it, for the share sheet
+function recReady() { // the replay is saved: wake up the buttons that need the file
+  for (const b of resEl.querySelectorAll('[data-rec]')) { b.disabled = false; if (b.dataset.rec === 'dl') b.textContent = 'Download replay'; } }
 
 /* ============ coaching: big just-in-time prompts for new players, a fix-it tip after each crash, instant retry ============ */
 const TOUCH_UI = matchMedia('(pointer:coarse)').matches;
@@ -1234,14 +1257,31 @@ function updateHints() {
   setHint(t);
 }
 const retryReady = () => (st.phase === 'crashed' && st.crashT > .8) || !resEl.hidden;
-function shareRun(rolls, flips) {
-  const url = 'https://nathan6609.github.io/roadster-launch/', tag = ' via @nathangu76';
-  const text = MARS.done ? `${(st.score || 0).toLocaleString('en-US')} pts: I flew the Roadster to Mars and landed it 🚀🔴 Can you?`
+const SHARE_URL = 'https://nathan6609.github.io/roadster-launch/';
+function runStats(rolls, flips) { // the run in numbers: one list feeds the share text and the replay's end card
+  const air = st.jumps.reduce((a, j) => Math.max(a, j.t || 0), 0), pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`, out = [];
+  if ((st.cleared || MARS.done) && st.phase !== 'crashed') out.push(st.time.toFixed(2) + ' s');
+  out.push(pl(rolls, 'roll'), pl(flips, 'flip'));
+  if (air >= .5) out.push(air.toFixed(1) + ' s air');
+  out.push(`top ${Math.round((st.maxV || 0) * 3.6)} km/h`);
+  return out;
+}
+function shareText(rolls, flips) {
+  const head = MARS.done ? 'I flew the Roadster to Mars and landed it 🚀🔴 Can you?'
     : st.phase === 'crashed' && st.world === 'mars' ? `So close: my Roadster made it to Mars and ${st.crashWhy} 💥 Can you land it?`
     : st.phase === 'crashed' ? `My Roadster ${st.crashWhy} 💥 Can you land the launch-night stunt?`
-    : st.cleared ? `${(st.score || 0).toLocaleString('en-US')} pts: I flew the Roadster over the line-up in ${st.time.toFixed(2)}s with ${rolls} roll${rolls === 1 ? '' : 's'}${flips ? ` and ${flips} flip${flips === 1 ? '' : 's'}` : ''} 🚀 Can you beat it?`
-    : `I got the Roadster through the launch but missed the line-up 😅 Can you clear it?`;
-  window.open('https://x.com/intent/post?text=' + encodeURIComponent(text + tag) + '&url=' + encodeURIComponent(url), '_blank', 'noopener');
+    : st.cleared ? 'I flew the Roadster over the line-up 🚀 Can you beat it?'
+    : 'I got the Roadster through the launch but missed the line-up 😅 Can you clear it?';
+  return `${head}\n🏁 ${st.score ? st.score.toLocaleString('en-US') + ' pts · ' : ''}${runStats(rolls, flips).join(' · ')}`;
+}
+function shareX(text) { window.open('https://x.com/intent/post?text=' + encodeURIComponent(text + ' via @nathangu76') + '&url=' + encodeURIComponent(SHARE_URL), '_blank', 'noopener'); }
+function shareInstagram(text) { // Instagram has no web share link: phones get the share sheet with the clip attached, desktops get the pieces
+  const caption = `${text}\nPlay free: ${SHARE_URL}`;
+  try { navigator.clipboard.writeText(caption).catch(() => {}); } catch (e) {} // the share sheet drops the text for Instagram, so it's on the clipboard to paste
+  if (REC.blob && navigator.canShare) { const file = new File([REC.blob], recName(), { type: /mp4/.test(REC.mime) ? 'video/mp4' : 'video/webm' }); // plain type: share sheets reject codec parameters
+    if (navigator.canShare({ files: [file] })) { navigator.share({ files: [file], text: caption }).catch(() => {}); return; } }
+  recDownload(); flash(REC.url ? 'Replay saved · caption copied · post it on Instagram' : 'Caption copied · post it on Instagram', 3.5, true);
+  window.open('https://www.instagram.com/', '_blank', 'noopener');
 }
 /* ============ trick pops and score: every half roll / full flip pops a punchy call-out, combos multiply, the landing banks it ============ */
 const popsEl = document.getElementById('pops'), scoreEl = document.getElementById('score');
@@ -1296,8 +1336,12 @@ function showResult() {
   else { h = 'FINISHED'; sub = `line-up not cleared · ${stats}`; tip = CRASH_TIP.hop; }
   if (best) sub += ` · best ${best.toFixed(2)} s`;
   const canRec = !!REC.r;
-  resEl.innerHTML = `${badge}<h2>${h}</h2>${score > 0 ? '<div class="score-big"><span>0</span><small>PTS</small></div>' : ''}${tip ? `<div class="tip">${tip}</div>` : ''}<div class="acts"><button class="again" type="button">↺ Run it again</button><button class="share" type="button">Share on 𝕏</button>${canRec ? '<button id="dl" type="button" disabled>Saving replay…</button>' : ''}</div><a class="by" href="https://x.com/nathangu76" target="_blank" rel="noopener">Made by @nathangu76</a>`;
-  resEl.hidden = false; countUp(resEl.querySelector('.score-big'), score); const ag = resEl.querySelector('.again'); if (ag) ag.onclick = () => spawn(); resEl.querySelector('.share').onclick = () => shareRun(rolls, flips); if (canRec) { document.getElementById('dl').onclick = recDownload; if (REC.url) { const b = document.getElementById('dl'); b.disabled = false; b.textContent = 'Download replay'; } recStop(); }
+  resEl.innerHTML = `${badge}<h2>${h}</h2>${score > 0 ? '<div class="score-big"><span>0</span><small>PTS</small></div>' : ''}${tip ? `<div class="tip">${tip}</div>` : ''}<div class="acts"><button class="again" type="button">↺ Run it again</button><button class="share" data-share="x" type="button">Share on 𝕏</button>${canRec ? '<button class="share" data-share="ig" data-rec="ig" type="button" disabled>Instagram</button><button id="dl" data-rec="dl" type="button" disabled>Saving replay…</button>' : ''}</div><a class="by" href="https://x.com/nathangu76" target="_blank" rel="noopener">Made by @nathangu76</a>`;
+  resEl.hidden = false; countUp(resEl.querySelector('.score-big'), score); const ag = resEl.querySelector('.again'); if (ag) ag.onclick = () => spawn();
+  const text = shareText(rolls, flips); resEl.querySelector('[data-share="x"]').onclick = () => shareX(text);
+  if (canRec) { resEl.querySelector('[data-share="ig"]').onclick = () => shareInstagram(text); document.getElementById('dl').onclick = recDownload; if (REC.url) recReady();
+    REC.card = { t: performance.now(), head: h.replace(/<[^>]+>/g, ''), score: score > 0 ? score.toLocaleString('en-US') : '', lines: [st.phase === 'crashed' ? st.crashWhy : '', runStats(rolls, flips).join('  ·  ')].filter(Boolean) };
+    recStop(3000); } // the end card stays on the clip for about three seconds
 }
 
 /* ============ sound: synthesised so nothing has to be downloaded ============ */
