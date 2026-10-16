@@ -1077,7 +1077,8 @@ function land() {
 }
 function takeOff(vel) { st.mode = 'air'; st.phase = 'air'; st.vel.copy(vel); st.js = newJumpStats(); st.tricks = { z: null, x: null }; st.popT = 0; }
 function step(dt) {
-  const thr = !!(keys.KeyW || keys.ArrowUp && false), brk = !!keys.KeyS, lift = !!keys.Space,
+  const finale = st.finished && hero.state !== 'off'; // the run's over and the pilot is on his way: W no longer drives
+  const thr = !finale && !!(keys.KeyW || keys.ArrowUp && false), brk = !!keys.KeyS, lift = !!keys.Space,
     rollIn = 0, pitchIn = 0;
   if (st.phase === 'ready') { if (thr || lift || brk) { st.phase = 'drive'; coach.runs++; store.set('rl_runs', coach.runs); flash('Go', .6); document.getElementById('start').classList.add('off'); recStart(); } }
   if (st.phase !== 'ready' && st.phase !== 'done' && st.phase !== 'crashed' && !st.finished) { st.time += dt; st.maxV = Math.max(st.maxV || 0, st.mode === 'air' ? st.vel.length() : st.v); }
@@ -1105,7 +1106,7 @@ function step(dt) {
     if (st.v < .5 && T.y > .2) { flash('Stalled on the wall', 1.5); st.w.set(.6, 0, 0); takeOff(N.clone().multiplyScalar(1.5)); }
     else if (lift) { jets = [1, 1, 1, 1]; takeOff(st.vel.clone().addScaledVector(N, 3)); }
     else if (st.th >= RAMP.tMax) { const over = (st.th - RAMP.tMax); takeOff(st.vel.clone()); st.pos.addScaledVector(st.vel, over / Math.max(st.v, 1)); }
-    else if (st.th < 0) { st.mode = 'ground'; st.phase = 'drive'; st.dir = 1; st.v = 0; st.pos.set(0, 0, RAMP.E.z); }
+    else if (st.th < 0) { st.mode = 'ground'; st.phase = 'drive'; st.pos.set(0, 0, RAMP.E.z); } // rolled back off the foot: keeps facing the ramp, still rolling backwards
   } else if (st.mode === 'warp') { stepWarp(dt); return;
   } else if (st.mode === 'air') {
     const up = V(0, 1, 0).applyQuaternion(st.q), fwd = V(0, 0, -1).applyQuaternion(st.q), js = st.js;
@@ -1201,7 +1202,7 @@ function recStart() {
   REC.r.onstop = () => { REC.url = URL.createObjectURL(new Blob(REC.chunks, { type: REC.mime || 'video/webm' })); const b = document.getElementById('dl'); if (b) { b.disabled = false; b.textContent = 'Download replay'; } };
   REC.r.start(500);
 }
-function recStop(delay = 1200) { setTimeout(() => { try { if (REC.r && REC.r.state === 'recording') REC.r.stop(); } catch (e) {} }, delay); }
+function recStop(delay = 1200) { const r = REC.r; setTimeout(() => { try { if (r && r.state === 'recording') r.stop(); } catch (e) {} }, delay); } // this run's recorder, not one a quick restart has started since
 function recDownload() { if (!REC.url) return; const a = document.createElement('a'); a.href = REC.url; a.download = `roadster-launch-${Date.now()}.${/mp4/.test(REC.mime) ? 'mp4' : 'webm'}`; document.body.appendChild(a); a.click(); a.remove(); }
 
 /* ============ coaching: big just-in-time prompts for new players, a fix-it tip after each crash, instant retry ============ */
@@ -1387,7 +1388,8 @@ function updateAudio() {
   snd.thrust.g.gain.setTargetAtTime(boost * .55 + lift * .5, t, .03); snd.thrust.fl.frequency.setTargetAtTime(380 + boost * 320 + lift * 220 + Math.min(500, sp * 4), t, .05);
   snd.hiss.g.gain.setTargetAtTime(lift * .16 + boost * .08, t, .03);
   const launchK = Math.max(0, 1 - sp / 40);
-  snd.roar.g.gain.setTargetAtTime((boost * (.55 + .5 * launchK) + lift * .35) * .7, t, .03); // kept under the score so the music still reads at full boost snd.roar.fl.frequency.setTargetAtTime(1800 + boost * 1400 + lift * 900, t, .05);
+  snd.roar.g.gain.setTargetAtTime((boost * (.55 + .5 * launchK) + lift * .35) * .7, t, .03); // kept under the score so the music still reads at full boost
+  snd.roar.fl.frequency.setTargetAtTime(1800 + boost * 1400 + lift * 900, t, .05);
   snd.rumble.g.gain.setTargetAtTime(boost * (.9 + launchK) + lift * .8, t, .05);
   snd.jet.g.gain.setTargetAtTime(lift * .28, t, .03);
   if (snd.music) snd.music.gain.setTargetAtTime(snd.on ? 1.1 : 0, t, .2);
