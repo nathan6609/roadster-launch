@@ -1261,11 +1261,11 @@ function updateHints() {
 }
 const retryReady = () => (st.phase === 'crashed' && st.crashT > .8) || !resEl.hidden;
 const SHARE_URL = 'https://nathan6609.github.io/roadster-launch/';
-function runStats(rolls, flips) { // the run in numbers: one list feeds the share text and the replay's end card
-  const air = st.jumps.reduce((a, j) => Math.max(a, j.t || 0), 0), pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`, out = [];
+function runStats(rolls, flips, air = true) { // the run in numbers: one list feeds the result panel, the share text and the replay's end card
+  const maxAir = st.jumps.reduce((a, j) => Math.max(a, j.t || 0), 0), pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`, out = [];
   if ((st.cleared || MARS.done) && st.phase !== 'crashed') out.push(st.time.toFixed(2) + ' s');
   out.push(pl(rolls, 'roll'), pl(flips, 'flip'));
-  if (air >= .5) out.push(air.toFixed(1) + ' s air');
+  if (air && maxAir >= .5) out.push(maxAir.toFixed(1) + ' s air');
   out.push(`top ${Math.round((st.maxV || 0) * 3.6)} km/h`);
   return out;
 }
@@ -1327,17 +1327,16 @@ function countUp(el, to) { // the total rolls up with a ticking sound, then land
 }
 function showResult() {
   const jl = st.jumps, rolls = jl.reduce((a, j) => a + Math.round((j.roll || 0) / Math.PI) / 2, 0), flips = jl.reduce((a, j) => a + Math.round((j.pitch || 0) / Math.PI) / 2, 0);
-  const stats = runStats(rolls, flips).join(' · '); // same numbers as the share text and the replay's end card
-  let h, sub;
+  const sub = runStats(rolls, flips, false).join(' · '); // kept short: time, rolls, flips, top speed (the share text and end card add airtime)
+  let h;
   msgEl.style.opacity = 0; msgT = 0; document.getElementById('start').classList.add('off'); // the result band replaces the crash / finish banner and the title card
   const score = st.score || 0, prevBest = store.get('rl_bestScore', 0); if (score > prevBest) store.set('rl_bestScore', score);
   let tip = '', best = store.get('rl_best', 0), badge = score > prevBest && prevBest > 0 ? '<div class="best-new">NEW BEST</div>' : '';
-  if (MARS.done && st.world === 'mars') { h = 'LANDED ON <span>MARS</span>'; sub = stats; }
-  else if (st.phase === 'crashed') { h = '<span>CRASHED</span>'; sub = `${st.crashWhy} · ${stats}`; tip = CRASH_TIP[CRASH_KIND(st.crashWhy)]; }
-  else if (st.cleared) { h = 'LAUNCH <span>COMPLETE</span>'; sub = stats; // runStats leads with the run's time
+  if (MARS.done && st.world === 'mars') h = 'LANDED ON <span>MARS</span>';
+  else if (st.phase === 'crashed') { h = '<span>CRASHED</span>'; tip = CRASH_TIP[CRASH_KIND(st.crashWhy)]; }
+  else if (st.cleared) { h = 'LAUNCH <span>COMPLETE</span>';
     if (!best || st.time < best) { best = st.time; store.set('rl_best', best); } }
-  else { h = 'FINISHED'; sub = `line-up not cleared · ${stats}`; tip = CRASH_TIP.hop; }
-  if (best) sub += ` · best ${best.toFixed(2)} s`;
+  else { h = 'FINISHED'; tip = CRASH_TIP.hop; }
   const canRec = !!REC.r;
   resEl.innerHTML = `${badge}<h2>${h}</h2>${score > 0 ? '<div class="score-big"><span>0</span><small>PTS</small></div>' : ''}${sub ? `<div class="sub">${sub.split(' · ').map(x => `<span>${x.replace(/\d[\d.,]*/, '<b>$&</b>')}</span>`).join('')}</div>` : ''}${tip ? `<div class="tip">${tip}</div>` : ''}<div class="acts"><button class="again" type="button">↺ Run it again</button><button class="share" data-share="x" type="button">Share on 𝕏</button>${canRec ? '<button class="share" data-share="ig" data-rec="ig" type="button" disabled>Instagram</button><button id="dl" data-rec="dl" type="button" disabled>Saving replay…</button>' : ''}</div><a class="by" href="https://x.com/nathangu76" target="_blank" rel="noopener">Made by @nathangu76</a>`;
   resEl.hidden = false; countUp(resEl.querySelector('.score-big'), score); const ag = resEl.querySelector('.again'); if (ag) ag.onclick = () => spawn();
