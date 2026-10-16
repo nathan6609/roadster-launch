@@ -1180,8 +1180,8 @@ function step(dt) {
   st.prevKeys = { KeyA: keys.KeyA, KeyD: keys.KeyD, ArrowUp: keys.ArrowUp, ArrowDown: keys.ArrowDown, Space: keys.Space };
 }
 /* ============ replay recorder: canvas video + the game's own audio, from the start of the run to the end ============ */
-// the replay is drawn into its own canvas, capped at 720p (540p on phones) and 30 fps with a faint watermark, at ~1.7 Mbps
-// (H.264 where the browser has it, so X and Instagram take it as is), and stops itself after 60 s: a typical run is ~5 MB.
+// the replay is drawn into its own canvas, capped at 1080p (720p on phones) and 30 fps with a faint watermark, at ~3 Mbps
+// (H.264 where the browser has it, so X and Instagram take it as is), and stops itself after 60 s: a 30 s run is ~10 MB.
 // The run's stats are burned into the last few seconds as an end card, so the clip carries them wherever it's posted.
 const REC = { r: null, chunks: [], blob: null, url: null, mime: '', cv: document.createElement('canvas'), ctx: null, t0: 0, MAX_S: 60, FPS: 30, lastDraw: 0, card: null };
 REC.ctx = REC.cv.getContext('2d');
@@ -1213,11 +1213,11 @@ function recStart() {
   try { if (REC.r && REC.r.state !== 'inactive') { REC.r.onstop = null; REC.r.stop(); } } catch (e) {}
   if (REC.url) { URL.revokeObjectURL(REC.url); REC.url = null; } REC.blob = null; REC.card = null; REC.lastDraw = 0;
   if (!REC.cv.captureStream || !window.MediaRecorder) return;
-  const cap = TOUCH_UI ? 960 : 1280, k = Math.min(1, cap / Math.max(canvas.width, canvas.height));
+  const cap = TOUCH_UI ? 1280 : 1920, k = Math.min(1, cap / Math.max(canvas.width, canvas.height));
   REC.cv.width = Math.round(canvas.width * k / 2) * 2; REC.cv.height = Math.round(canvas.height * k / 2) * 2; // even sizes for the encoder
   const stream = REC.cv.captureStream(REC.FPS); if (snd.recDest) for (const t of snd.recDest.stream.getAudioTracks()) stream.addTrack(t);
   REC.mime = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
-  const vbr = Math.round(Math.max(.8e6, Math.min(2.5e6, REC.cv.width * REC.cv.height * REC.FPS * .06))); // ~1.7 Mbps at 720p30
+  const vbr = Math.round(Math.max(1.2e6, Math.min(3.5e6, REC.cv.width * REC.cv.height * REC.FPS * .05))); // ~3.1 Mbps at 1080p30
   try { REC.r = new MediaRecorder(stream, REC.mime ? { mimeType: REC.mime, videoBitsPerSecond: vbr, audioBitsPerSecond: 96000 } : undefined); } catch (e) { REC.r = null; return; }
   REC.t0 = performance.now();
   REC.chunks = []; REC.r.ondataavailable = e => { if (e.data && e.data.size) REC.chunks.push(e.data); };
