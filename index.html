@@ -1522,8 +1522,9 @@ function step(dt) {
   st.prevKeys = { KeyA: keys.KeyA, KeyD: keys.KeyD, ArrowUp: keys.ArrowUp, ArrowDown: keys.ArrowDown, Space: keys.Space };
 }
 /* ============ replay recorder: canvas video + the game's own audio, from the start of the run to the end ============ */
-// the replay is drawn into its own canvas, capped at 1080p (720p on phones) and 30 fps with a faint watermark, at ~3 Mbps
-// (H.264 where the browser has it, so X and Instagram take it as is), and stops itself after 60 s: a 30 s run is ~10 MB.
+// the replay is drawn into its own canvas at 30 fps with a faint watermark, and stops itself after 60 s. Where the browser has
+// WebCodecs it's up to 1440p, constant-quality H.264 + AAC (WcRecorder, about 22 MB a minute in heavy smoke); otherwise
+// MediaRecorder at 1080p (720p on phones), ~3 Mbps. Both are H.264 MP4 where possible, so X and Instagram take them as is.
 // The run's stats are burned into the last few seconds as an end card, so the clip carries them wherever it's posted.
 const REC = { r: null, chunks: [], blob: null, url: null, mime: '', cv: document.createElement('canvas'), ctx: null, t0: 0, MAX_S: 60, FPS: 30, lastDraw: 0, card: null };
 REC.ctx = REC.cv.getContext('2d');
@@ -1535,6 +1536,7 @@ function recFrame() { // called right after each composer.render(), while the We
   const c = REC.ctx, w = REC.cv.width, h = REC.cv.height; c.drawImage(canvas, 0, 0, w, h);
   if (REC.card) recCard(c, w, h);
   watermark(c, w, h);
+  if (REC.r.addFrame) REC.r.addFrame(REC.cv, st.world === 'mars' ? WC_QP.mars : WC_QP.earth); // WebCodecs takes frames; MediaRecorder samples the canvas itself
 }
 function watermark(c, w, h) {
   const fs = Math.max(11, Math.round(h * .022)); c.font = `600 ${fs}px Oxanium, "Arial Narrow", sans-serif`; c.textAlign = 'right'; c.textBaseline = 'bottom';
@@ -1598,16 +1600,72 @@ function posterText(c, W, H, card) { // title, the big score, the run in numbers
   y += 8; c.font = M(16); for (const m of card.missions) { const t = '✓ ' + m, w = c.measureText(t).width + 22; c.fillStyle = 'rgba(125,255,176,.14)'; c.fillRect(x, y - 20, w, 30); c.strokeStyle = 'rgba(125,255,176,.6)'; c.strokeRect(x + .5, y - 19.5, w - 1, 29); c.fillStyle = '#7dffb0'; c.fillText(t, x + 11, y); y += 38; if (y > H - 70) break; }
   if (card.name) { c.font = D(26); c.fillStyle = '#7fe9ff'; c.fillText(card.name, x, H - 46); }
 }
+/* the sharper recorder: WebCodecs H.264 in constant-quality mode (it spends bits only where a frame needs them: smoke, Mars
+   ground) plus AAC audio, packed into an MP4. Measured on the game's own frames, it records 1440p in about the same size as
+   MediaRecorder's 1080p at 3 Mbps, visibly sharper in smoke and without dropped frames. It mimics MediaRecorder (state,
+   start/stop/pause/resume, ondataavailable/onstop), so the rest of the recorder works with either. Chromium-based browsers
+   for now (the audio tap needs MediaStreamTrackProcessor); everywhere else MediaRecorder carries on as before. */
+const WC = { ok: false, mux: null, rates: [] };
+(async () => { try {
+  if (!window.VideoEncoder || !window.AudioEncoder || !window.VideoFrame || !window.MediaStreamTrackProcessor) return;
+  const v = await VideoEncoder.isConfigSupported({ codec: 'avc1.640032', width: 2560, height: 1440, framerate: 30, latencyMode: 'quality', bitrateMode: 'quantizer', avc: { format: 'avc' } });
+  if (!v.supported) return;
+  for (const sampleRate of [48000, 44100]) { const a = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate, numberOfChannels: 2, bitrate: 128000 }); if (a.supported) WC.rates.push(sampleRate); }
+  WC.mux = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.mjs'); WC.ok = true;
+} catch (e) {} })();
+const WC_QP = { earth: 35, mars: 32 }; // H.264 quantizer: lower is sharper and bigger. Mars ground is fine grain that 35 flattens; 32 keeps it (+~40% there)
+class WcRecorder {
+  constructor(w, h, audioTrack) {
+    const { Muxer, ArrayBufferTarget } = WC.mux, sr = snd.ctx ? snd.ctx.sampleRate : 0;
+    this.state = 'inactive'; this.onstop = this.ondataavailable = null; this.n = 0; this.samples = 0; this.paused = 0; this.failed = false;
+    this.audio = !!(audioTrack && WC.rates.includes(sr)); this.target = new ArrayBufferTarget();
+    this.mux = new Muxer({ target: this.target, video: { codec: 'avc', width: w, height: h, frameRate: REC.FPS }, ...(this.audio ? { audio: { codec: 'aac', sampleRate: sr, numberOfChannels: 2 } } : {}), fastStart: 'in-memory', firstTimestampBehavior: 'offset' });
+    this.venc = new VideoEncoder({ output: (c, m) => this.mux.addVideoChunk(c, m), error: () => { this.failed = true; } });
+    this.venc.configure({ codec: 'avc1.640032', width: w, height: h, framerate: REC.FPS, latencyMode: 'quality', bitrateMode: 'quantizer', avc: { format: 'avc' } });
+    if (this.audio) { this.aenc = new AudioEncoder({ output: (c, m) => this.mux.addAudioChunk(c, m), error: () => { this.failed = true; } });
+      this.aenc.configure({ codec: 'mp4a.40.2', sampleRate: sr, numberOfChannels: 2, bitrate: 128000 });
+      this.reader = new MediaStreamTrackProcessor({ track: audioTrack }).readable.getReader(); }
+  }
+  start() { this.state = 'recording'; this.t0 = performance.now(); if (this.reader) this.pump(); }
+  async pump() { // the game's mixed audio, re-timed by sample count so a pause leaves no gap and the sound stays on the video
+    try { while (this.state !== 'inactive') { const { value: a, done } = await this.reader.read(); if (done) break;
+      if (this.state === 'recording') { const n = a.numberOfFrames, data = new Float32Array(n * 2);
+        for (let ch = 0; ch < 2; ch++) a.copyTo(data.subarray(ch * n, (ch + 1) * n), { planeIndex: Math.min(ch, a.numberOfChannels - 1), format: 'f32-planar' });
+        const out = new AudioData({ format: 'f32-planar', sampleRate: a.sampleRate, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round(this.samples / a.sampleRate * 1e6), data });
+        this.samples += n; this.aenc.encode(out); out.close(); }
+      a.close(); } } catch (e) {}
+  }
+  addFrame(cv, qp) { // a frame from the replay canvas; under load the encoder's queue is the limit, never memory
+    if (this.state !== 'recording' || this.failed || this.venc.encodeQueueSize > 4) return;
+    const f = new VideoFrame(cv, { timestamp: Math.round((performance.now() - this.t0 - this.paused) * 1000) });
+    this.venc.encode(f, { keyFrame: this.n++ % (REC.FPS * 2) === 0, avc: { quantizer: qp } }); f.close();
+  }
+  pause() { if (this.state === 'recording') { this.state = 'paused'; this.pausedAt = performance.now(); } }
+  resume() { if (this.state === 'paused') { this.paused += performance.now() - this.pausedAt; this.state = 'recording'; } }
+  async stop() {
+    if (this.state === 'inactive') return; this.state = 'inactive'; try { if (this.reader) this.reader.cancel(); } catch (e) {}
+    try { await this.venc.flush(); if (this.aenc) await this.aenc.flush(); this.mux.finalize(); } catch (e) { this.failed = true; }
+    try { this.venc.close(); if (this.aenc) this.aenc.close(); } catch (e) {}
+    if (!this.failed && this.n && this.ondataavailable) this.ondataavailable({ data: new Blob([this.target.buffer], { type: 'video/mp4' }) });
+    if (this.onstop) this.onstop();
+  }
+}
 function recStart() {
-  try { if (REC.r && REC.r.state !== 'inactive') { REC.r.onstop = null; REC.r.stop(); } } catch (e) {}
-  if (REC.url) { URL.revokeObjectURL(REC.url); REC.url = null; } REC.blob = null; REC.card = null; REC.lastDraw = 0;
-  if (!REC.cv.captureStream || !window.MediaRecorder) return;
-  const cap = TOUCH_UI ? 1280 : 1920, k = Math.min(1, cap / Math.max(canvas.width, canvas.height));
-  REC.cv.width = Math.round(canvas.width * k / 2) * 2; REC.cv.height = Math.round(canvas.height * k / 2) * 2; // even sizes for the encoder
-  const stream = REC.cv.captureStream(REC.FPS); if (snd.recDest) for (const t of snd.recDest.stream.getAudioTracks()) stream.addTrack(t);
-  REC.mime = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
-  const vbr = Math.round(Math.max(1.2e6, Math.min(3.5e6, REC.cv.width * REC.cv.height * REC.FPS * .05))); // ~3.1 Mbps at 1080p30
-  try { REC.r = new MediaRecorder(stream, REC.mime ? { mimeType: REC.mime, videoBitsPerSecond: vbr, audioBitsPerSecond: 96000 } : undefined); } catch (e) { REC.r = null; return; }
+  try { if (REC.r && REC.r.state !== 'inactive') { REC.r.onstop = REC.r.ondataavailable = null; REC.r.stop(); } } catch (e) {} // the old recorder's last data must not land in this run's chunks
+  if (REC.url) { URL.revokeObjectURL(REC.url); REC.url = null; } REC.blob = null; REC.card = null; REC.lastDraw = 0; REC.r = null;
+  // sized from the full render resolution (not whatever the frame-rate fallback has dropped to) and held there while recording (see dynRes)
+  const fw = Math.round(innerWidth * PR.max), fh = Math.round(innerHeight * PR.max), floor = PR.max * .82; if (PR.cur < floor - .01) setPR(Math.max(PR.min, floor));
+  if (WC.ok) { try { const k = Math.min(1, (TOUCH_UI ? 1920 : 2560) / Math.max(fw, fh)); // up to 1440p
+      REC.cv.width = Math.round(fw * k / 2) * 2; REC.cv.height = Math.round(fh * k / 2) * 2;
+      REC.r = new WcRecorder(REC.cv.width, REC.cv.height, snd.recDest && snd.recDest.stream.getAudioTracks()[0]); REC.mime = 'video/mp4'; } catch (e) { REC.r = null; } }
+  if (!REC.r) { // MediaRecorder, as before: 1080p (720p on phones) at ~3 Mbps
+    if (!REC.cv.captureStream || !window.MediaRecorder) return;
+    const k = Math.min(1, (TOUCH_UI ? 1280 : 1920) / Math.max(fw, fh));
+    REC.cv.width = Math.round(fw * k / 2) * 2; REC.cv.height = Math.round(fh * k / 2) * 2; // even sizes for the encoder
+    const stream = REC.cv.captureStream(REC.FPS); if (snd.recDest) for (const t of snd.recDest.stream.getAudioTracks()) stream.addTrack(t);
+    REC.mime = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
+    const vbr = Math.round(Math.max(1.2e6, Math.min(3.5e6, REC.cv.width * REC.cv.height * REC.FPS * .05))); // ~3.1 Mbps at 1080p30
+    try { REC.r = new MediaRecorder(stream, REC.mime ? { mimeType: REC.mime, videoBitsPerSecond: vbr, audioBitsPerSecond: 96000 } : undefined); } catch (e) { REC.r = null; return; } }
   REC.t0 = performance.now();
   REC.chunks = []; REC.r.ondataavailable = e => { if (e.data && e.data.size) REC.chunks.push(e.data); };
   REC.r.onstop = () => { REC.blob = new Blob(REC.chunks, { type: REC.mime || 'video/webm' }); REC.url = URL.createObjectURL(REC.blob); recReady(); };
@@ -2865,7 +2923,8 @@ function dynRes(raw) {
   if (raw > .25 || performance.now() < DYN.t0 || document.hidden || DYN.capped) return; DYN.sum += raw; DYN.n++; if (DYN.sum < 1.5) return;
   const avg = DYN.sum / DYN.n; DYN.sum = DYN.n = 0;
   if (DYN.tried && avg > DYN.prev * .93) { if (++DYN.tried > 2) { DYN.capped = true; setPR(PR.max); return; } } else if (DYN.tried) DYN.tried = 0;
-  if (avg > 1 / 42 && PR.cur > PR.min + .01) { DYN.prev = avg; DYN.tried = DYN.tried || 1; DYN.good = 0; setPR(Math.max(PR.min, PR.cur * .82)); }
+  const floor = REC.r && REC.r.state === 'recording' ? Math.max(PR.min, PR.max * .82) : PR.min; // while recording: the first step down at most, so the replay keeps its sharpness
+  if (avg > 1 / 42 && PR.cur > floor + .01) { DYN.prev = avg; DYN.tried = DYN.tried || 1; DYN.good = 0; setPR(Math.max(floor, PR.cur * .82)); }
   else if (avg < 1 / 57) { if (++DYN.good >= 4 && PR.cur < PR.max - .01) { DYN.good = 0; setPR(Math.min(PR.max, PR.cur * 1.12)); } } else DYN.good = 0;
 }
 addEventListener('resize', resize); resize();
