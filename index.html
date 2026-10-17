@@ -1094,6 +1094,7 @@ function toggleKeys(open = keysEl.hidden) { keysEl.hidden = !open; try { localSt
 try { if (localStorage.getItem('rl_keys') === '1') keysEl.hidden = false; } catch (e) {}
 keysBtn.addEventListener('click', () => toggleKeys());
 addEventListener('keydown', e => { if (e.target && e.target.tagName === 'INPUT') { if (e.key === 'Enter') e.target.blur(); return; }
+  if (!lbEl.hidden) return; // the leaderboard is on top: keys don't drive, restart or summarise the run underneath it
   if (retryReady() && !e.repeat && !['KeyM', 'KeyH', 'MetaLeft', 'MetaRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight', 'Tab'].includes(e.code)) { e.preventDefault(); spawn(); return; }
   keys[e.code] = true; for (const k of document.querySelectorAll(`#start kbd[data-k="${e.code}"]`)) k.classList.add('down'); if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   if (e.code === 'KeyM') { snd.on = !snd.on; flash(snd.on ? 'Sound on' : 'Sound off'); }
@@ -1145,7 +1146,7 @@ const smooth = x => x * x * x * (x * (x * 6 - 15) + 10), clamp01 = x => Math.max
 const cueEl = document.getElementById('cue'), resEl = document.getElementById('result');
 const WHEEL_CONTACT = [V(-.92, .02, 1.45), V(.92, .02, 1.45), V(-.92, .02, -1.42), V(.92, .02, -1.42)];
 function spawn() {
-  Object.assign(st, { mode: 'ground', phase: 'ready', v: 0, dir: -1, yaw: 0, steer: 0, rampX: 0, th: 0, time: 0, cue: false, jumps: [], js: null, cleared: false, finished: false, crashWhy: '', maxV: 0 });
+  Object.assign(st, { mode: 'ground', phase: 'ready', v: 0, dir: -1, yaw: 0, steer: 0, rampX: 0, th: 0, time: 0, cue: false, jumps: [], js: null, cleared: false, finished: false, clockDone: false, sumT: 0, crashWhy: '', maxV: 0, runId: (st.runId || 0) + 1 });
   if (st.world === 'mars') setWorld('earth'); marsGuardReset(); MARS.done = false; st.rk = null; st.fuel = 100; st.marsAge = 0; entryEl.style.opacity = 0; resetRings(); warpEl.className = ''; wflashEl.className = ''; marsWinEl.className = '';
   msgEl.style.opacity = 0; msgT = 0; startShot(); setHint(''); st.score = 0; st.parts = {}; st.banked = 0; st.rampDone = false; st.mdone = {}; st.finishDone = false; st.summary = false; scoreReset(); popsEl.innerHTML = ''; for (const c of COILS) c.zapped = false; // a restart starts clean: no leftover banner, the standard chase view straight back behind the car (any orbit or zoom dropped)
   for (const pr of props) { if (!pr.home) pr.home = [pr.w.position.clone(), pr.w.rotation.clone()]; pr.hit = false; pr.body = null; pr.w.position.copy(pr.home[0]); pr.w.rotation.copy(pr.home[1]); pr.w.updateMatrixWorld(true); pr.box.setFromObject(pr.w); }
@@ -1257,7 +1258,7 @@ function heroUpdate(dt) {
   } else if (hero.state === 'land') {
     hero.light.intensity *= Math.exp(-4 * dt);
     if (hero.t > .9 && !hero.said) { hero.said = true; shout(); }
-    if (hero.t > 3.4) { hero.state = 'done'; st.finished = false; } // he stays standing there; control comes back, and the camera eases back behind the car (no cut)
+    if (hero.t > 3.4) { hero.state = 'done'; st.finished = false; openSummary(); } // he stays standing there and the run summary comes up; Keep driving hands control back, and the camera eases back behind the car (no cut)
   }
 }
 function groundWashAt(P, k) { if (rnd() < k) { const a = rnd() * 6.283, sp = 5 + rnd() * 7; puff(V(P.x + Math.cos(a) * .6, .3, P.z + Math.sin(a) * .6), V(Math.cos(a) * sp, .3 + rnd() * .6, Math.sin(a) * sp), .8 + rnd() * .5, 2.5 + rnd(), 0xe9edf1, .45, 1.5, true); } }
@@ -1349,7 +1350,7 @@ function updateProps(dt) {
 }
 function crash(why) {
   if (st.phase === 'crashed') return;
-  const wasAir = st.mode === 'air'; if (st.mode !== 'air' && st.vel.lengthSq() < 1) st.vel.copy(fwdOf(st.yaw || 0)).multiplyScalar(st.v);
+  const wasAir = (st.mode === 'air' || st.mode === 'rocket') && !!st.js; if (!wasAir && st.vel.lengthSq() < 1) st.vel.copy(fwdOf(st.yaw || 0)).multiplyScalar(st.v);
   st.phase = 'crashed'; st.mode = 'crashed'; st.crashWhy = why; track('crash'); coach.last = CRASH_KIND(why); store.set('rl_lastCrash', coach.last); setHint('');
   carBody.setFrom(st.pos, st.q, st.vel, st.w.clone().applyQuaternion(st.q).add(V((rnd() - .5) * 1.5, (rnd() - .5) * 1, (rnd() - .5) * 1.5))); st.shake = 1.4; landFx(); flash('CRASH · ' + why, 3);
   st.jumps.push(wasAir ? { ...st.js, grade: 'CRASH' } : { t: 0, maxH: 0, grade: 'CRASH' }); st.crashT = 0;
@@ -1375,9 +1376,10 @@ function land() {
   if (rolls >= .5) bits.push(rolls + ' Roll' + (rolls > 1 ? 's' : '')); if (flips >= .5) bits.push(flips + ' Flip' + (flips > 1 ? 's' : ''));
   if (js.t > .4) flash((clean ? 'Clean Landing!! ' : 'Hard Landing! ') + bits.join(', '), 2.4, true);
   bankJump(js, clean); if (st.world === 'mars' && !MARS.done) marsLanded();
-  if (js.fromLip && !st.rampDone) { st.rampDone = true; setTimeout(() => missionDone('ramp', 1500, 'C-RAMP CONQUERED!'), 300); } // one-off mission
-  if (st.pos.z > LINEUP_Z + 16 && js.x0 < LINEUP_Z && !st.cleared) { st.cleared = true; addPart('lineup', 1000); setTimeout(() => missionDone('lineup', 1000, 'CLEARED THE LINE-UP!'), 450); }
+  if (!mars && js.fromLip && !st.rampDone) { st.rampDone = true; later(300, () => missionDone('ramp', 1500, 'C-RAMP CONQUERED!')); } // one-off mission (a flight off the lip that ends on Mars is the Mars mission, not this one)
+  if (!mars && js.over && st.pos.z > LINEUP_Z + 16 && js.x0 < LINEUP_Z && !st.cleared) { st.cleared = true; addPart('lineup', 1000); later(450, () => missionDone('lineup', 1000, 'CLEARED THE LINE-UP!')); } // over the cars, not beside them
 }
+function later(ms, fn) { const id = st.runId; setTimeout(() => { if (st.runId === id) fn(); }, ms); } // a delayed reward lands in the run that earned it, not the next one after a quick restart
 function takeOff(vel) { st.mode = 'air'; st.phase = 'air'; st.vel.copy(vel); st.js = newJumpStats(); st.tricks = { z: null, x: null }; st.popT = 0; }
 function step(dt) {
   const finale = st.finished && hero.state !== 'off'; // the run's over and the pilot is on his way: no controls until his scene is done
@@ -1385,7 +1387,8 @@ function step(dt) {
   const thr = !lobby && !finale && !!(keys.KeyW || keys.ArrowUp && false), brk = !lobby && !finale && !!keys.KeyS, lift = !lobby && !finale && !!keys.Space, // the pilot's scene plays out untouched: you watch it
     rollIn = 0, pitchIn = 0;
   if (st.phase === 'ready') { if (thr || lift || brk) { st.phase = 'drive'; coach.runs++; track('run'); store.set('rl_runs', coach.runs); flash('Go', .6); document.getElementById('start').classList.add('off'); recStart(); } }
-  if (st.phase !== 'ready' && st.phase !== 'done' && st.phase !== 'crashed' && !st.finished) { st.time += dt; st.maxV = Math.max(st.maxV || 0, st.mode === 'air' ? st.vel.length() : st.v); }
+  if (st.phase !== 'ready' && st.phase !== 'done' && st.phase !== 'crashed') { if (!st.clockDone) st.time += dt; st.maxV = Math.max(st.maxV || 0, st.mode === 'air' || st.mode === 'rocket' ? st.vel.length() : Math.abs(st.v)); } // the run's time stops at its goal; top speed keeps counting
+  if (st.sumT > 0 && (st.sumT -= dt) <= 0 && st.phase !== 'crashed') openSummary(); // after a Mars touchdown: the run summary, unless it crashed meanwhile
   let jets = [0, 0, 0, 0], side = [0, 0], boost = false;
   if (st.world === 'mars') { st.marsAge = (st.marsAge || 0) + dt; if (st.marsAge < 4.5 && (st.mode === 'air' || st.mode === 'rocket')) { // the thick upper air: drag pulls you down to ~80 m/s, then thins out
     const k = 1 - smooth(clamp01((st.marsAge - 2.5) / 2)), e = Math.exp(-.8 * k * dt); st.vel.x *= e; st.vel.z *= e; st.vel.y += (-80 - st.vel.y) * (1 - Math.exp(-1.1 * k * dt)); st.shake = Math.max(st.shake, .7 * k); } }
@@ -1410,7 +1413,8 @@ function step(dt) {
     if (st.mode === 'crashed') return;
     if (lift && st.mode === 'ground') { jets = [1, 1, 1, 1]; takeOff(V(0, .5, 0).addScaledVector(F, st.v)); st.popT = .3; }
     { const h = hitsObstacle(); if (h.length) { smash(h); crash('ploughed into the line-up'); } }
-    if (st.world !== 'mars' && st.phase === 'drive' && st.vel.z > 0 && st.pos.z > FINISH_Z && !st.finishDone) { st.finishDone = true; missionDone('finish', 500, 'FINISH LINE!'); if (st.cleared) { st.finished = true; heroStart(); } } // the pilot's welcome plays once; the run carries on
+    if (st.world !== 'mars' && st.phase === 'drive' && st.dir > 0 && st.v > 0 && st.pos.z > FINISH_Z && !st.finishDone) { st.finishDone = true; missionDone('finish', 500, 'FINISH LINE!'); // driving forwards over it (backing over doesn't count); the course stays open, the C-ramp isn't required
+      if (st.cleared) { st.clockDone = true; const best = store.get('rl_best', 0); if (!best || st.time < best) store.set('rl_best', st.time); if (heroStart()) st.finished = true; } } // the pilot's welcome plays once (if his model loaded); the run carries on
     if (st.finished && hero.state !== 'off') { st.v = Math.max(0, st.v - Math.max(1.5, 1.2 * st.v) * dt); if (st.v > 1) jets = [0, 0, 0, 0]; } // run's over: retro-jets ease it to a stop, firm at first, gentle at the end
   } else if (st.mode === 'ramp') {
     // on the deck: gravity along it, drag, throttle; the fans hold it on (FAN_G), so it only comes off if it stalls or reaches the lip
@@ -1507,6 +1511,7 @@ function step(dt) {
   if (jets.some(x => x)) groundWash(Math.max(...jets) * .9);
   if (boost) { emitRear(st.mode === 'ramp' ? .25 : .9); st.shake = Math.max(st.shake, .25); }
   if (st.mode === 'ground' && thr && st.v < 14 && st.v > .1) for (const w of WHEEL_CONTACT.slice(0, 2)) if (rnd() < .6) puff(w.clone().add(st.pos).add(V(0, .3, 0)), V((rnd() - .5) * 2, .8, 4 + rnd() * 3), .5, 2.6, 0xc4c9d1, .5, 3);
+  if (st.js && st.world !== 'mars' && (st.mode === 'air' || st.mode === 'rocket') && Math.abs(st.pos.x) < 4.5 && st.pos.z > LINEUP_Z - .9 && st.pos.z < LINEUP_Z + 16.1) st.js.over = true; // flew over the line-up
   if (st.world !== 'mars' && (st.mode === 'air' || st.mode === 'rocket') && st.pos.distanceTo(MARS_C) < MARS_R * 1.1) arriveMars(); // into Mars' air: straight on, no cut
   bumpOthers(dt);
   updateHints();
@@ -1529,6 +1534,7 @@ const REC = { r: null, chunks: [], blob: null, url: null, mime: '', cv: document
 REC.ctx = REC.cv.getContext('2d');
 function recFrame() { // called right after each composer.render(), while the WebGL frame is still readable
   if (!REC.r || REC.r.state !== 'recording') return;
+  if (!canvas.width || !canvas.height || !REC.cv.width || !REC.cv.height) return; // collapsed canvas (zero-size window, hidden frame): drawImage would throw and kill the game loop
   const now = performance.now();
   if (now - REC.t0 > REC.MAX_S * 1000) { try { REC.r.stop(); } catch (e) {} return; }
   if (now - REC.lastDraw < 1000 / REC.FPS - 4) return; REC.lastDraw = now; // the stream only samples 30 fps: skip the copies it would drop
@@ -1613,7 +1619,7 @@ function recStart() {
   REC.r.onstop = () => { REC.blob = new Blob(REC.chunks, { type: REC.mime || 'video/webm' }); REC.url = URL.createObjectURL(REC.blob); recReady(); };
   REC.r.start(500);
 }
-function recStop(delay = 1200) { const r = REC.r; setTimeout(() => { try { if (r && r.state === 'recording') r.stop(); } catch (e) {} }, delay); } // this run's recorder, not one a quick restart has started since
+function recStop(delay = 1200) { const r = REC.r; setTimeout(() => { try { if (r && r.state !== 'inactive') r.stop(); } catch (e) {} }, delay); } // this run's recorder, not one a quick restart has started since
 function recDownload() { if (!REC.url) return; const a = document.createElement('a'); a.href = REC.url; a.download = `roadster-launch-${Date.now()}.${/mp4/.test(REC.mime) ? 'mp4' : 'webm'}`; document.body.appendChild(a); a.click(); a.remove(); }
 const recName = () => `roadster-launch-${Date.now()}.${/mp4/.test(REC.mime) ? 'mp4' : 'webm'}`; // the file name recDownload gives it, for the share sheet
 function recReady() { // the replay is saved: wake up the buttons that need the file
@@ -1650,6 +1656,7 @@ function updateHints() {
       const vy = st.vel.y, tLand = (vy + Math.sqrt(Math.max(0, vy * vy + 2 * G * st.pos.y))) / G;
       if (st.pos.y > 5 && tLand > 1.25) { setHint(TOUCH_UI ? 'BONUS: TAP FLIP' : 'BONUS:  ↑ / ↓  FLIP', true); return; } }
   } else if (st.mode === 'ground' && st.dir > 0 && !st.cleared && !st.finished && st.pos.z > HOP_Z - 26 && st.pos.z < HOP_Z + 2 && st.v > 5 && (again('hop') || again('carry'))) t = TOUCH_UI ? 'TAP JETS' : 'JETS!  SPACE';
+  else if (st.mode === 'ground' && GAR.mode === 'online' && !document.body.classList.contains('lobby') && st.world !== 'mars' && st.dir < 0 && !st.rampDone && st.time < 8 && st.pos.z > RAMP.E.z + 4 && Math.abs(st.pos.x) > RAMP.half - .2) t = TOUCH_UI ? 'STEER ONTO THE RAMP' : 'STEER ONTO THE RAMP  ·  A / D'; // online start slots off the centre line miss the C-ramp
   setHint(t);
 }
 const retryReady = () => ((st.phase === 'crashed' && st.crashT > .8) || (!resEl.hidden && !st.summary)) && lbEl.hidden;
@@ -1667,6 +1674,7 @@ function shareText(rolls, flips) {
     : st.phase === 'crashed' && st.world === 'mars' ? `So close: my Roadster made it to Mars and ${st.crashWhy} 💥 Can you land it?`
     : st.phase === 'crashed' ? `My Roadster ${st.crashWhy} 💥 Can you land the launch-night stunt?`
     : st.cleared ? 'I flew the Roadster over the line-up 🚀 Can you beat it?'
+    : !st.finishDone ? 'Mid-run in Roadster Launch and still flying 🚀 Can you beat my score?'
     : 'I got the Roadster through the launch but missed the line-up 😅 Can you clear it?';
   return `${head}\n🏁 ${st.score ? st.score.toLocaleString('en-US') + ' pts · ' : ''}${runStats(rolls, flips).join(' · ')}`;
 }
@@ -1809,10 +1817,10 @@ function carSpheres(pos, q, out) { const f = V(0, 0, -1).applyQuaternion(q), u =
 const SAFE_S = 3, ghostT = () => GAR.mode === 'online' && (st.safeT > 0 || document.body.classList.contains('lobby')) && st.phase !== 'crashed' ? 1 : 0; // spawn protection: the first 3 s after a spawn, then it lifts by itself (moving or not)
 function bumpOthers(dt) {
   if (document.body.classList.contains('lobby')) { st.safeT = SAFE_S; return; } // in the garage nothing touches your car; the 3 s countdown starts at START
-  st.safeT = Math.max(0, (st.safeT || 0) - dt); if (GAR.mode !== 'online' || !['ground', 'air', 'rocket'].includes(st.mode)) return; BUMP.cool -= dt; const safe = ghostT() > 0;
+  st.safeT = Math.max(0, (st.safeT || 0) - dt); if (GAR.mode !== 'online' || !['ground', 'air', 'rocket'].includes(st.mode)) return; if (st.finished && hero.state !== 'off') return; /* the pilot's scene: nobody shoves the car */ BUMP.cool -= dt; const safe = ghostT() > 0;
   const myW = st.world === 'mars' ? 1 : 0, mine = carSpheres(st.pos, st.q, []), R = 1.15;
   for (const O of [...NET.peers.values(), ...AI.list]) {
-    if (!O.g.visible || !O.model || O.world !== myW || O.g.position.distanceToSquared(st.pos) > 64) continue;
+    if (!O.g.visible || !O.model || O.ghost || O.world !== myW || O.g.position.distanceToSquared(st.pos) > 64) continue;
     const theirs = carSpheres(O.g.position, O.g.quaternion, []); let best = null, depth = 0;
     for (const a of mine) for (const b of theirs) { const d = a.distanceTo(b); if (d < 2 * R && 2 * R - d > depth) { depth = 2 * R - d; best = [a, b]; } }
     if (!best) continue;
@@ -1878,7 +1886,7 @@ function aiTick(now) {
 function netTick(now) {
   if (GAR.mode !== 'online') return;
   if (NET.open && NET.helloSent && now - NET.sendT > 100) { NET.sendT = now; const r2 = v => Math.round(v * 100) / 100, r3 = v => Math.round(v * 1000) / 1000;
-    const f = (st.mode === 'rocket' || rearFlame[0].material.opacity > .3 ? 1 : 0) | (liftGlow[0].material.opacity > .3 ? 2 : 0) | (st.mode === 'rocket' ? 4 : 0) | (st.phase === 'crashed' ? 8 : 0);
+    const f = (st.mode === 'rocket' || rearFlame[0].material.opacity > .3 ? 1 : 0) | (liftGlow[0].material.opacity > .3 ? 2 : 0) | (st.mode === 'rocket' ? 4 : 0) | (st.phase === 'crashed' ? 8 : 0) | (st.summary || !lbEl.hidden || (st.finished && hero.state !== 'off') ? 16 : 0); // 16: ghost (paused or in the pilot's scene): others pass through
     try { NET.ws.send(JSON.stringify({ t: 's', p: [r2(st.pos.x), r2(st.pos.y), r2(st.pos.z)], q: [r3(st.q.x), r3(st.q.y), r3(st.q.z), r3(st.q.w)], w: st.world === 'mars' ? 1 : 0, f, sc: st.score || 0 })); } catch (e) {} }
   const rt = now - 130, myW = st.world === 'mars' ? 1 : 0;
   for (const P of NET.peers.values()) {
@@ -1888,7 +1896,7 @@ function netTick(now) {
     const u = b.t > a.t ? clamp01((rt - a.t) / (b.t - a.t)) : 1;
     P.g.position.set(a.p[0] + (b.p[0] - a.p[0]) * u, a.p[1] + (b.p[1] - a.p[1]) * u, a.p[2] + (b.p[2] - a.p[2]) * u);
     qa.set(...a.q).normalize(); qb.set(...b.q).normalize(); P.g.quaternion.copy(qa.slerp(qb, u));
-    P.world = b.w; const gap = B.length > 1 ? b.t - B[B.length - 2].t : 0; P.vel = B.length > 1 && gap > 30 && gap < 500 ? V(b.p[0] - B[B.length - 2].p[0], b.p[1] - B[B.length - 2].p[1], b.p[2] - B[B.length - 2].p[2]).divideScalar(gap / 1000).clampLength(0, 90) : V(0, 0, 0);
+    P.world = b.w; P.ghost = !!(b.f & 16); const gap = B.length > 1 ? b.t - B[B.length - 2].t : 0; P.vel = B.length > 1 && gap > 30 && gap < 500 ? V(b.p[0] - B[B.length - 2].p[0], b.p[1] - B[B.length - 2].p[1], b.p[2] - B[B.length - 2].p[2]).divideScalar(gap / 1000).clampLength(0, 90) : V(0, 0, 0);
     P.g.visible = b.w === myW && now - b.t < 5000;
   }
 }
@@ -1910,18 +1918,19 @@ function lbRender(d) {
   ol.innerHTML = d && d.top && d.top.length ? d.top.map((r, k) => `<li style="--i:${k}" class="${r.rank <= 3 ? 'r' + r.rank : ''} ${r.me ? 'me' : ''}"><i>${r.rank}</i><b>${esc(r.name)}</b><span>${r.score.toLocaleString('en-US')}</span></li>`).join('') : '<li class="empty">No runs yet. Be the first!</li>';
   lbEl.querySelector('.you').textContent = d && d.rank && !d.top.some(r => r.me) ? `You: #${d.rank} · ${(d.best || 0).toLocaleString('en-US')}` : d && d.total ? `${d.total.toLocaleString('en-US')} racers` : '';
 }
+function lbClose() { lbEl.hidden = true; recResume(); }
 async function lbOpen() {
-  lbEl.hidden = false; lbEl.querySelector('ol').innerHTML = '<li class="empty">Loading…</li>'; lbEl.querySelector('.you').textContent = '';
+  lbEl.hidden = false; recPause(); // the run waits underneath (see frame) until it closes lbEl.querySelector('ol').innerHTML = '<li class="empty">Loading…</li>'; lbEl.querySelector('.you').textContent = '';
   try { const r = await fetch(`${LB_URL}?device=${DEVICE}`); lbRender(await r.json()); } catch (e) { lbEl.querySelector('ol').innerHTML = '<li class="empty">Leaderboard unavailable right now</li>'; }
 }
 async function lbSubmit(name, score) {
   const r = await fetch(LB_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device: DEVICE, name, score }) });
   const d = await r.json(); if (!r.ok) throw new Error(d.error || 'failed'); track('submit'); return d;
 }
-lbEl.querySelector('.back').onclick = () => { lbEl.hidden = true; };
+lbEl.querySelector('.back').onclick = lbClose;
 fetch(`${LB_URL}?device=${DEVICE}`).then(r => r.json()).then(d => { if (d && d.total >= 10) document.getElementById('gstat').textContent = `${d.total.toLocaleString('en-US')} racers on the board`; }).catch(() => {}); // real numbers only
-lbEl.addEventListener('pointerdown', e => { e.stopPropagation(); if (e.target === lbEl) lbEl.hidden = true; });
-addEventListener('keydown', e => { if (!lbEl.hidden && (e.code === 'Escape' || e.code === 'Backspace') && !(e.target && e.target.tagName === 'INPUT')) { lbEl.hidden = true; e.stopImmediatePropagation(); } }, true);
+lbEl.addEventListener('pointerdown', e => { e.stopPropagation(); if (e.target === lbEl) lbClose(); });
+addEventListener('keydown', e => { if (!lbEl.hidden && (e.code === 'Escape' || e.code === 'Backspace') && !(e.target && e.target.tagName === 'INPUT')) { lbClose(); e.stopImmediatePropagation(); } }, true);
 document.getElementById('lbBtn').onclick = lbOpen;
 function lbResultRow(score) { // the line under the big score: name + one button, then your rank
   const row = resEl.querySelector('.lbrow'); if (!row) return; const inp = row.querySelector('input'), btn = row.querySelector('button');
@@ -2013,8 +2022,10 @@ function missionDone(k, pts, title) { (st.mdone ||= {})[k] = true; addScore(pts)
 document.getElementById('misBtn').onclick = e => { e.stopPropagation(); misEl.hidden = !misEl.hidden; store.set('rl_misOpen', !misEl.hidden); missionsUI(); };
 misEl.hidden = !store.get('rl_misOpen', !matchMedia('(pointer:coarse)').matches); // open on desktops, closed on phones until tapped
 subBtn.onclick = e => { e.stopPropagation(); openSummary(); };
-function openSummary() { if (!(st.score > 0) || !resEl.hidden || st.phase === 'crashed') return; st.summary = true; showResult(); }
-function closeSummary() { st.summary = false; resEl.hidden = true; document.body.classList.remove('resultup'); canvas.focus(); }
+function recPause() { try { if (REC.r && REC.r.state === 'recording') { REC.r.pause(); REC.pausedAt = performance.now(); } } catch (e) {} } // the run is held: no frozen stretch in the replay
+function recResume() { try { if (REC.r && REC.r.state === 'paused' && !st.summary && lbEl.hidden) { REC.r.resume(); REC.t0 += performance.now() - REC.pausedAt; } } catch (e) {} }
+function openSummary() { if (!(st.score > 0) || !resEl.hidden || st.phase === 'crashed') return; st.summary = true; showResult(); recPause(); }
+function closeSummary() { st.summary = false; recResume(); resEl.hidden = true; document.body.classList.remove('resultup'); canvas.focus(); }
 /* ============ trick pops and score: every half roll / full flip pops a punchy call-out, combos multiply, the landing banks it ============ */
 const popsEl = document.getElementById('pops'), scoreEl = document.getElementById('score');
 const ROLL_NAME = n => ['', 'ROLL OUT!', 'BARREL ROLL!', '1.5 ROLLS!', 'DOUBLE ROLL!!', '2.5 ROLLS!', 'TRIPLE ROLL!!!'][n] || `${n / 2} ROLLS!!!`;
@@ -2079,9 +2090,8 @@ function showResult() {
   let h;
   msgEl.style.opacity = 0; msgT = 0; popsEl.innerHTML = ''; document.getElementById('start').classList.add('off'); // the result band replaces the crash / finish banner and the title card
   const score = st.score || 0, prevBest = store.get('rl_bestScore', 0); if (score > prevBest) store.set('rl_bestScore', score);
-  let tip = '', best = store.get('rl_best', 0), badge = score > prevBest && prevBest > 0 ? '<div class="best-new">NEW BEST</div>' : '';
+  let tip = '', badge = score > prevBest && prevBest > 0 ? '<div class="best-new">NEW BEST</div>' : '';
   const legend = MISSIONS.filter(m => !m.soon).every(misDone); // every mission in one run: the big one
-  if (st.cleared && (!best || st.time < best)) { best = st.time; store.set('rl_best', best); }
   if (legend) h = 'ALL MISSIONS <span>COMPLETE</span>';
   else if (st.phase === 'crashed') { h = '<span>CRASHED</span>'; tip = CRASH_TIP[CRASH_KIND(st.crashWhy)]; }
   else h = 'YOUR <span>RUN</span>';
@@ -2488,7 +2498,7 @@ function updateRings(dt, t) {
       if (rel.addScaledVector(R.n, -d).length() < R.r) { R.done = true; RINGS.got++; RINGS.streak++; const k = RINGS.streak, pts = Math.round(250 * (1 + .25 * (k - 1)) / 10) * 10;
         addScore(pts); ringBurst(R); hitSound(Math.min(8, 2 + k)); st.shake = Math.max(st.shake, .6);
         pop(`RING ${RINGS.got}/${RINGS.N}`, k > 1 ? `STREAK x${k}` : '', 'cool');
-        missionMark('rings'); if (RINGS.got === RINGS.N) setTimeout(() => { addScore(1500); pop('PERFECT PATH!', '', 'big cool'); hitSound(8); }, 500); }
+        missionMark('rings'); if (RINGS.got === RINGS.N) later(500, () => { addScore(1500); pop('PERFECT PATH!', '', 'big cool'); hitSound(8); }); }
       else RINGS.streak = 0; // flew past it: the run of gates is broken
     }
     R.prev = d;
@@ -2752,7 +2762,7 @@ function stepWarp(dt) {
     warpEl.className = ''; wflashEl.className = 'out'; setTimeout(() => { pop('WELCOME TO MARS', '0.38 g', 'cool'); }, 700); }
 }
 function marsLanded() {
-  track('land'); MARS.done = true; addScore(5000); missionMark('mars');
+  track('land'); MARS.done = true; st.clockDone = true; st.sumT = 3.3; addScore(5000); missionMark('mars'); // sumT: the run summary follows the touchdown title (3.2 s), in game time
   const tv = st.touchVy || 0, grade = tv < 3 ? ['PERFECT TOUCHDOWN', 3000] : tv < 6 ? ['TOUCHDOWN', 1500] : ['HARD TOUCHDOWN', 400], onRwy = Math.abs(st.pos.x) < 15 && st.pos.z > MARS_Z - 60 && st.pos.z < MARS_Z + 640;
   addScore(grade[1] + (onRwy ? 2000 : 0)); marsWinEl.querySelector('i').innerHTML = `${grade[0]}  +${(5000 + grade[1] + (onRwy ? 2000 : 0)).toLocaleString('en-US')}${onRwy ? '<small>ON THE RUNWAY</small>' : ''}`; msgEl.style.opacity = 0; msgT = 0; popsEl.innerHTML = ''; // the title owns the screen
   marsWinEl.className = 'on'; st.shake = 2.6; shockRing.position.set(st.pos.x, .05, st.pos.z); shockRing.userData.t = 0; shockRing.visible = true;
@@ -2877,9 +2887,10 @@ let last = performance.now(), running = false, ambT = 0, slowT = 0, last0 = perf
 function frame(now) {
   const raw = (now - last) / 1000, dt = Math.min(.033, raw); last = now;
   if (window.__pause) { smokePass.enabled = VOL.ok && VOL.list.length > 0; if (DASH.want) renderPoster(DASH.want); composer.render(); requestAnimationFrame(frame); return; } // test hook: render only, the sim is stepped by hand
-  dynRes(raw); if (running && !st.summary) for (let i = 0; i < 4; i++) step(dt / 4); // the score card pauses the run
+  const held = st.summary || !lbEl.hidden; // the score card or the leaderboard is up: the run waits
+  dynRes(raw); if (running && !held) for (let i = 0; i < 4 && !st.summary; i++) step(dt / 4); // the score card pauses the run
   ambT += dt; if (ambT > .12) { ambT = 0; const m = machines[(rnd() * machines.length) | 0]; puff(m.clone().add(V((rnd() - .5) * 4, 0, 0)), V((rnd() - .5) * 2, .4, 2 + rnd() * 2), 2.5, 9, rnd() < .35 ? 0xc87c86 : 0xaab1bb, .32, 2.2); }
-  updateSmoke(dt); updateBillows(dt); updateVol(dt); updateProps(dt); heroUpdate(dt); updateShock(dt); updateCrowd(dt, now / 1000); updateGlow(now / 1000); updateCoils(dt); updateMars(); updateEntry(); touchUI(); updateSky(dt, now / 1000); updateRings(dt, now / 1000); updateProgress(); updateFloods(dt); updateCamera(dt); updateAudio(); smokePass.enabled = VOL.ok && VOL.list.length > 0; if (DASH.want) renderPoster(DASH.want); composer.render(); recFrame(); dashFrame(); netTick(now); aiTick(now);
+  updateSmoke(dt); updateBillows(dt); updateVol(dt); updateProps(dt); if (!held) heroUpdate(dt); updateShock(dt); updateCrowd(dt, now / 1000); updateGlow(now / 1000); updateCoils(dt); updateMars(); updateEntry(); touchUI(); updateSky(dt, now / 1000); updateRings(dt, now / 1000); updateProgress(); updateFloods(dt); updateCamera(dt); updateAudio(); smokePass.enabled = VOL.ok && VOL.list.length > 0; if (DASH.want) renderPoster(DASH.want); composer.render(); recFrame(); dashFrame(); netTick(now); aiTick(now);
   if (smokePass.enabled) { slowT = (now - last0) > 25 ? slowT + dt : Math.max(0, slowT - dt); if (slowT > 1) smokePass.degrade(); } last0 = now;
   const sp = st.mode === 'air' || st.mode === 'rocket' ? st.vel.length() : Math.abs(st.v);
   const reversing = st.mode === 'ground' && st.v < -.05; spdEl.textContent = (reversing ? 'R ' : '') + Math.round(sp * 3.6);
